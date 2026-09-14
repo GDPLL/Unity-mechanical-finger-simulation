@@ -1,0 +1,61 @@
+# ============================================
+# Unity 官方推荐 .gitignore 模板
+# 来源: https://github.com/github/gitignore/blob/main/Unity.gitignore
+# ============================================
+
+# Unity 自动生成的文件夹
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+
+# 特定于 Unity 的忽略项
+sysinfo.txt
+crashlytics-build.properties
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+
+# Visual Studio / IDE 生成的文件
+.vs/
+.consulo/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.tmp
+
+# 构建产物
+*.apk
+*.aab
+*.unitypackage
+*.app
+*.ipa
+
+# Addressables 打包产物
+/[Aa]ssets/[Aa]ddressable[Aa]ssets[Dd]ata/*/*.bin*
+/[Aa]ssets/[Ss]treamingAssets/aa.meta
+/[Aa]ssets/[Ss]treamingAssets/aa/*
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 其他通用忽略
+*.log
+*.bak
+.env
+*.local
