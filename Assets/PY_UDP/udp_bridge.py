@@ -29,7 +29,10 @@ def UDP_send(message):
 
 def UDP_start():
     global _sock
+    if _sock is not None:      # 幂等：可被 Main 与 UDP 线程重复调用
+        return
     _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    UDP_send("BLE_STATUS:searching")
 
 
 def UDP_close():
