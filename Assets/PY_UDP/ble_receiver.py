@@ -15,34 +15,20 @@ BLE_WRITE_DELAY = 0.02                       # 两次 BLE 写入间隔（秒）
 _loop = None        #事件循环
 _client = None      #蓝牙客户端组件
 _stop_event = None  # asyncio.Event，控制会话退出
-_on_message_callback = None   # 收到 BLE 数据后的去处，由 Main 注入
-_on_status_callback = None    # 连接状态变化的去处，由 Main 注入
 
-# ===== 对外注册接口（Main 用来接线） =====
-def set_message_callback(cb):
-    """注册数据接收回调：收到 ESP32 数据后调用 cb(message: str)
-       cb 为 None 时只打印日志（即本模块可完全独立运行）"""
-    global _on_message_callback
-    _on_message_callback = cb
+_ble_status_event = []    # BLE连接变化事件
+_ble_Receive_event = []     #BLE接收事件
 
 
-def set_status_callback(cb):
+# BLE接收事件注册
+def BLE_register(func):                                   
+    _ble_Receive_event.append(func)
+
+def BLE_status_callback(cb):
     """注册状态回调：连接状态变化时调用 cb(status: str)
        status 取值：searching / connecting / connected / failed / disconnected"""
-    global _on_status_callback
-    _on_status_callback = cb
-
-
-def _notify_status(status):
-    """把状态抛给外部，未注册时静默忽略"""
-    print(f"ble_receiver|状态: {status}")
-    if _on_status_callback is None:
-        return
-    try:
-        _on_status_callback(status)
-    except Exception as e:
-        print(f"ble_receiver| 状态回调异常: {e}")
-
+    global _ble_status_event
+    _ble_status_event = cb
 
 # 将ble_receiver -> BLE 启动回传协程
 def BLE_Sender_Start(model_bytes):
@@ -96,7 +82,7 @@ async def BLE_Receiver_Start():
     _loop = asyncio.get_running_loop()
     _stop_event = asyncio.Event()
 
-    _notify_status("searching")
+    BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|正在扫描'{ESP32_NAME}' ...")
     print(f"ble_receiver|正在扫描 '{ESP32_NAME}' ...")
     devices = await BleakScanner.discover(timeout=5.0)
 
@@ -107,14 +93,15 @@ async def BLE_Receiver_Start():
         if device.name == ESP32_NAME:
             esp32_mac = device.address
             print(f"ble_receiver|找到设备! MAC: {esp32_mac}")
+            BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|找到设备! MAC: {esp32_mac}")
             break
 
     if not esp32_mac:
         print("ble_receiver|没找到 ESP32，请检查")
-        _notify_status("failed")
+        BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|没找到 ESP32，请检查")
         return
 
-    _notify_status("connecting")
+    BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|连接成功")
     await BLE_Receiver_Session(esp32_mac)
 
 # 接收端会话
@@ -126,7 +113,7 @@ async def BLE_Receiver_Session(esp32_mac):
         async with BleakClient(esp32_mac) as client:
             _client = client
             print("ble_receiver|连接成功！等待数据中... (Ctrl+C 或 stop_ble() 停止)")
-            _notify_status("connected")
+            BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|连接成功！等待数据中... ")
 
             await client.start_notify(CHARACTERISTIC_UUID, BLE_Receiver)
 
@@ -141,11 +128,11 @@ async def BLE_Receiver_Session(esp32_mac):
         raise
     except Exception as e:
         print(f"ble_receiver|连接失败: {e}")
-        _notify_status("failed")
+        BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|连接失败: {e}")
         return False
     finally:
         _client = None
-        _notify_status("disconnected")
+        BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|连接已关闭")
         print("ble_receiver|连接已关闭")
     return True
 
@@ -153,14 +140,28 @@ async def BLE_Receiver_Session(esp32_mac):
 def BLE_Receiver(sender, data):
     message = data.decode('utf-8', errors='replace').strip()    # 把收到的字节数据转成字符串并打印
     print(f"ble_receiver|收到: {message}")
+    
+    BLE_Event_Savetrigger(_ble_Receive_event,message)           # 触发事件
 
-    if _on_message_callback is None:
+# 安全事件触发
+def BLE_Event_Savetrigger(event,*args, **kwargs):
+    if event is None:
         print("ble_receiver| 未注册回调，数据仅打印")   # 独立运行时的默认行为
         return
-    try:
-        _on_message_callback(message)
-    except Exception as e:
-        print(f"ble_receiver| 回调异常: {e}")
+    for func in event:                           # 接收事件触发
+        try:
+            func(*args,**kwargs)
+        except Exception as e:
+                print(f"ble_receiver| 回调异常: {e}")
+    
+
+   
+    
+
+        
+
+
+
 
 
 # 手动主启动入口 - 启动异步 

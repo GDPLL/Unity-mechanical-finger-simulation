@@ -1,21 +1,23 @@
 import socket
 import threading
-
+import asyncio
 # udp_bridge - Unity 基于UDP收发中转
 
 
-TARGET_IP = "127.0.0.1"      # 对应 Unity targetIP（Unity 接收地址）
-TARGET_PORT = 8888           # 对应 Unity targetPort（Unity 接收端口）
-LISTEN_IP = "127.0.0.1"      # Python 回传监听地址
+TARGET_IP = "127.0.0.1"      
+TARGET_PORT = 8888           # 蓝牙接收中转数据流端口
 LISTEN_PORT = 8890           # Unity 回传 UDP 端口
+TARGET_LOG_PORT = 8889       # 蓝牙接收中转测试日志端口
+
 LOG_ENABLED = True           # 对应 logEnabled
 
 _sock = None                 # UDP 发送套接字（-> Unity）
 _recv_sock = None            # UDP 接收套接字（Unity 回传 ->）
-_on_model_callback = None    # 模型回传回调
+
+_UDP_receiver_event = []    # 模型回传回调
 
 
-# ===== 发送到 Unity =====
+# UDP 发送到端口回调函数
 def UDP_send(message):
     global _sock
     if _sock is None:
@@ -26,66 +28,52 @@ def UDP_send(message):
         data = message
     _sock.sendto(data, (TARGET_IP, TARGET_PORT))
 
-
-def UDP_start():
+# 配置UDP与开启回传循环
+async def UDP_start():
     global _sock
     if _sock is not None:      # 幂等：可被 Main 与 UDP 线程重复调用
         return
-    _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    UDP_send("BLE_STATUS:searching")
+    _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)    #IPV4协议，UDP传输
+    _sock.bind((TARGET_IP, LISTEN_PORT))                   #绑定接收端口
+    _sock.setblocking(False)    # 设置非阻塞
+    UDP_send("UDP|创建传输")
+    
+    await _recv_loop()     # 启动回传协程
 
-
+# UDP回传接收循环
+async def _recv_loop():
+    model_buf = bytearray()     #可变数组
+    loop = asyncio.get_running_loop()   
+    while True:
+        data,address = await loop.sock_recvfrom(_sock, 65536)   # 协程读取数据
+        
+        if data.startswith(b'MODEL_START:'):
+            model_buf = bytearray()
+            continue
+        elif data == b'MODEL_END':
+            if _UDP_receiver_event is not None and len(model_buf) > 0:
+                if LOG_ENABLED:
+                    print(f"udp_bridge: 收到模型，共 {len(model_buf)} 字节，启动回传事件")
+                UDP_Event_Savetrigger(_UDP_receiver_event,bytes(model_buf))            # 开始回传事件
+            model_buf = bytearray()
+            continue
+        else:
+            model_buf += data
+            
+            
 def UDP_close():
     global _sock
     if _sock is not None:
         _sock.close()
         _sock = None
-
-
-# ===== 接收 Unity 回传 =====
-def set_model_callback(cb):
-    """注册模型回传回调：收到完整模型数据后调用 cb(model_bytes)"""
-    global _on_model_callback
-    _on_model_callback = cb
-
-
-def start_recv(port=LISTEN_PORT):
-    """启动 UDP 监听线程，接收 Unity 回传的模型文件"""
-    global _recv_sock
-    _recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    _recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    _recv_sock.bind((LISTEN_IP, port))
-    _recv_sock.settimeout(0.5)
-    t = threading.Thread(target=_recv_loop, daemon=True)
-    t.start()
-    if LOG_ENABLED:
-        print(f"udp_bridge: 回传监听已启动 {LISTEN_IP}:{port}")
-
-
-def _recv_loop():
-    """接收 Unity 回传数据。协议：
-       MODEL_START:<totalBytes>  -> 开始
-       原始字节分片               -> 数据
-       MODEL_END                  -> 结束，重组后触发回调
-    """
-    model_buf = bytearray()
-    while True:
+        
+# 安全事件触发
+def UDP_Event_Savetrigger(event,*args, **kwargs):
+    if event is None:
+        print("udp_bridge| 未注册回传回调")   
+        return
+    for func in event:                           # 接收事件触发
         try:
-            data, _addr = _recv_sock.recvfrom(65536)
-        except socket.timeout:
-            continue
-        except Exception:
-            break
-
-        if data.startswith(b'MODEL_START:'):
-            model_buf = bytearray()
-            continue
-        elif data == b'MODEL_END':
-            if _on_model_callback is not None and len(model_buf) > 0:
-                if LOG_ENABLED:
-                    print(f"udp_bridge: 收到模型，共 {len(model_buf)} 字节，转交 BLE 回传")
-                _on_model_callback(bytes(model_buf))
-            model_buf = bytearray()
-            continue
-        else:
-            model_buf += data
+            func(*args,**kwargs)
+        except Exception as e:
+                print(f"udp_bridge| 回调异常: {e}")
