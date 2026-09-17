@@ -14,11 +14,16 @@ LOG_ENABLED = True           # 对应 logEnabled
 MODEL_START_TAG = b'MODEL_START:'   # 模型回传起始标记
 MODEL_END_TAG = b'MODEL_END'        # 模型回传结束标记
 
-_sock = None                    # UDP 收发套接字（-> Unity，同时承接回传）
 _UDP_receiver_event = []        # 模型回传回调
 
 _no_sock = False             # 套接字就绪标记
 _recv_loop_running = False   # 回传接收循环是否已在运行
+
+# 字典套接字
+_channels = {
+    "data": {"sock": None, "port": TARGET_PORT,     "warned": False},
+    "log":  {"sock": None, "port": TARGET_LOG_PORT, "warned": False},
+}
 
 # 注册回传事件
 def UDP_register_event(event):
@@ -26,52 +31,99 @@ def UDP_register_event(event):
     _UDP_receiver_event.append(event)
 
 # UDP 发送到端口回调函数
-def UDP_send(message):
-    global _sock, _no_sock
-    if _sock is None:      # 未就绪时不能静默丢弃，否则首包丢失无从排查
-        if not _no_sock:
-            _no_sock = True
-            print("udp_bridge| 套接字未就绪，数据被丢弃（UDP_init 尚未完成）")
-        return
-    if isinstance(message, str):
-        data = message.encode('utf-8')
-    else:
-        data = message
+def UDP_Date_send(message):
+    UDP_send("data",message)
+
+def UDP_Log_send(message):
+    UDP_send("log",message)
+
+def UDP_set_sock(name, sock):
+    if name in _channels:
+        _channels[name]["sock"] = sock
+        _channels[name]["warned"] = False   # 重新就绪后，警告标志复位
+
+# 按字典对应通道发送到指定位置
+def UDP_send(name, message):
+    ch = _channels.get(name)
+    if ch is None:
+        print(f"udp_bridge| 未知通道: {name}")
+        return False
+
+    sock = ch["sock"]
+    if sock is None:
+        if not ch["warned"]:
+            ch["warned"] = True
+            print(f"udp_bridge| [{name}] 套接字未就绪，数据被丢弃")
+        return False
+
+    data = message.encode('utf-8') if isinstance(message, str) else message
     try:
-        _sock.sendto(data, (TARGET_IP, TARGET_PORT))
-    except OSError as e:      # 非阻塞套接字发送缓冲满等情况不再静默
-        print(f"udp_bridge| 发送失败，数据被丢弃: {e}")
+        sock.sendto(data, (TARGET_IP, ch["port"]))
+        return True
+    except OSError as e:
+        print(f"udp_bridge| [{name}] 发送失败: {e}")
+        return False
+
 
 # 创建UDP套接字并配置端口参数
 def UDP_init():
-    global _sock
+     
+    ch = _channels.get("data")
+    if ch is None:
+        print("udp_bridge| 未知通道: data")
+        return False
+    _sock = ch["sock"]
+    
+    #启用数据流套接字
     if _sock is not None:       # 幂等
         return True
     if not hasattr(asyncio.BaseEventLoop, "sock_recvfrom"):
         raise RuntimeError(
             f"udp_bridge| 需要 Python 3.11+（asyncio.loop.sock_recvfrom），当前 {sys.version.split()[0]}"
         )
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)    #IPV4协议，UDP传输
-    sock.bind((TARGET_IP, LISTEN_PORT))                   #绑定接收端口
-    sock.setblocking(False)    # 设置非阻塞
-    _sock = sock
+    _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)    #IPV4协议，UDP传输
+    _sock.bind((TARGET_IP, LISTEN_PORT))                    #绑定回传接收端口
+    _sock.setblocking(False)                                # 设置非阻塞    
+    
+    UDP_set_sock("data",_sock)
     return True
+
+# UPD日志端口
+def UDP_LOG_init():
+    
+    ch = _channels.get("log")
+    if ch is None:
+        print("udp_bridge| 未知通道: log")
+        return False
+    _sock_log = ch["sock"]
+
+    #启用日志PY日志输出套接字
+    if _sock_log is not None:
+        return True
+    _sock_log = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)    #IPV4协议，UDP传输
+    _sock_log.setblocking(False)                                 # 设置非阻塞     
+    
+    UDP_set_sock("log",_sock_log)
+    return True
+     
 
 # 配置UDP与开启回传循环,无限等待数据
 async def UDP_start():
     global _recv_loop_running
     UDP_init()                 # 幂等套接字创建
+    UDP_LOG_init()             # 日志sock
     if _recv_loop_running:     # 幂等单一接收循环
         return
     _recv_loop_running = True
-    UDP_send("UDP|创建传输")
+    UDP_Log_send("UDP|创建传输")
     
     await _recv_loop()     # 启动回传协程
+    
 
 # UDP回传接收循环，持续读取目标端口数据，完成传输后启动中转事件
 async def _recv_loop():
     model_buf = bytearray()     # 可变数组
-    sock = _sock                # 固定本次循环套接字，避免 UDP_close 读到 None
+    sock = _channels["data"]["sock"]              # 固定本次循环套接字，避免 UDP_close 读到 None
     loop = asyncio.get_running_loop()   
     while True:
         try:
@@ -96,12 +148,14 @@ async def _recv_loop():
             
             
 def UDP_close():
-    global _sock, _no_sock, _recv_loop_running
-    if _sock is not None:
-        _sock.close()
-        _sock = None
-    _no_sock = False            # 允许重新初始化
-    _recv_loop_running = False
+    global _recv_loop_running
+    for ch in _channels.values:
+        if ch is not None:
+            if ch["sock"] is not None:
+                ch["sock"].close()
+                ch["sock"]=None
+                ch["warned"] =False
+    _recv_loop_running =False   
         
 # 安全事件触发
 def UDP_Event_Savetrigger(event,*args, **kwargs):

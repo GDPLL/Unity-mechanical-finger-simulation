@@ -4,10 +4,17 @@ using System.Threading;
 using System.IO;
 using System.Text;
 using System.Globalization;
+using System.Collections.Generic;
 
+/// <summary>
+/// 管理机器状态值与其历史记录，提供管理方法
+/// <para>存储当前接收机器状态值，提供写入数据方法</para>
+/// <para>提供开始记录数据方法，存入目标路径CSV</para>
+/// <para>提供读取数据方法</para>
+/// </summary>
 public class Main_Date : MonoBehaviour
 {
-    // ===== 对外公开的状态数据（由UDP线程写入，主线程读取）=====
+    // 解析后设备状态值，对外展示
     public int mode { get; private set; }
     public int currentAngle { get; private set; }
     public int targetAngle { get; private set; }
@@ -15,18 +22,19 @@ public class Main_Date : MonoBehaviour
     public float rest2 { get; private set; }   // 通道B基准值（float）
     public bool hasData { get; private set; }
 
-    // 读写锁：后台UDP写入与主线程读取互斥
-    public readonly ReaderWriterLockSlim rwLock = new ReaderWriterLockSlim();
+    // Py进程日志存储
+    public Queue<string> Recevie_Log;   
+    private const int MAX_COUNT = 100;
 
-    // ======================================================================
-    // 数据记录（双通道 CSV）
-    // ======================================================================
+    // 允许同时读，锁定写入独占
+    public readonly ReaderWriterLockSlim rwLock = new ReaderWriterLockSlim();
 
     [Header("数据记录")]
     [Tooltip("记录目标行数，达到后自动保存并触发完成回调")]
     public int targetRows = 10000;
     [Tooltip("CSV 存储目录（相对于项目根目录）")]
     public string recordFolder = "Assets/ninapro_DB2/data";
+
     [Tooltip("记录完成回调（可在 Inspector 中绑定按钮/事件）")]
     public UnityEvent onRecordingComplete;
 
@@ -34,16 +42,13 @@ public class Main_Date : MonoBehaviour
     [Tooltip("UI_sampling 引用，用于刷新记录状态文本")]
     public UI_sampling ui;
 
-    private bool _recording;
+
+    private bool _recording;    // 记录中 状态
     private int _recordCount;
     private readonly StringBuilder _csvBuf = new StringBuilder();
     private volatile bool _completionPending;
 
     public bool isRecording => _recording;
-
-    // ======================================================================
-    // 公开方法
-    // ======================================================================
 
     /// <summary>由UDP线程调用：写入数据</summary>
     public void WriteData(int mode, int currentAngle, int targetAngle, float rest1, float rest2)
@@ -59,6 +64,30 @@ public class Main_Date : MonoBehaviour
             this.hasData = true;
         }
         finally { rwLock.ExitWriteLock(); }
+    }
+
+    /// <summary>
+    /// 由UDP线程调用：保证 MAX_COUNT = 100 的日志写入方法
+    /// </summary>
+    /// <param name="str">日志</param>
+    public void WritLog(string str)
+    {
+        if (Recevie_Log.Count >= MAX_COUNT)
+        {
+            Recevie_Log.Dequeue();   // 满了，丢掉最旧的一条
+        }
+        Recevie_Log.Enqueue(str);
+    }
+
+    /// <summary>
+    /// 读取最新日志
+    /// </summary>
+    /// <returns></returns>
+    public string ReadLog()
+    {
+        if (Recevie_Log.Count == 0)
+            return null;
+        return Recevie_Log.Dequeue();
     }
 
     /// <summary>由主线程调用：读取数据</summary>
@@ -78,9 +107,6 @@ public class Main_Date : MonoBehaviour
         finally { rwLock.ExitReadLock(); }
     }
 
-    // ======================================================================
-    // 记录控制（供按钮调用）
-    // ======================================================================
 
     /// <summary>开始记录：清空 data 目录下的 CSV，重置计数器</summary>
     public void StartRecording()
@@ -121,9 +147,6 @@ public class Main_Date : MonoBehaviour
         }
     }
 
-    // ======================================================================
-    // 内部
-    // ======================================================================
 
     private void Update()
     {
@@ -136,6 +159,9 @@ public class Main_Date : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// 清空CSV目录
+    /// </summary>
     private void ClearRecordFolder()
     {
         string folder = GetRecordFolderPath();
@@ -147,16 +173,23 @@ public class Main_Date : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// 生成目标CSV在文件路径下
+    /// </summary>
     private void SaveCsv()
     {
         string folder = GetRecordFolderPath();
-        Directory.CreateDirectory(folder);
+        Directory.CreateDirectory(folder);      //创建文件夹
         string fileName = System.DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".csv";
         string path = Path.Combine(folder, fileName);
         File.WriteAllText(path, _csvBuf.ToString(), Encoding.UTF8);
         Debug.Log($"Main_Date: 已保存 {_recordCount} 行 → {path}");
     }
 
+    /// <summary>
+    /// 获取记录路径
+    /// </summary>
+    /// <returns></returns>
     private string GetRecordFolderPath()
     {
         string folder = Path.Combine(Application.dataPath, "..", recordFolder);

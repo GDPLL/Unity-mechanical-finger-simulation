@@ -6,20 +6,27 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Globalization;
+using System.Threading.Tasks;
 
+/// <summary>
+/// <para>负责UDP_sock接收与回传的创建</para>
+/// <para>接收循环负责日志与数据流的双重监听，脚本启用时新建线程创建接收循环，接收循环自带解析，本地完成到Main_Date的存储</para>
+/// <para>回传循环由main负责调用，线程完成传输后自动销毁</para>
+/// </summary>
 public class Main_UDP : MonoBehaviour
 {
     [Header("数据存储")]
-    public Main_Date dataStore;
+    public Main_Date dataStore; //数据存储组件
 
     [Header("UDP设置")]
-    public int port = 8888;
+    public const int RECEIVER_PORT = 8888;      //接收数据流端口
+    public const int RECEIVERLOG_PORT = 8889;   //接收日志端口
 
     [Header("回传UDP设置")]
     [Tooltip("Python 回传监听地址")]
     public string sendTargetIP = "127.0.0.1";
     [Tooltip("Python 回传监听端口")]
-    public int sendPort = 8890;
+    public int SENDPORT = 8890;
     [Tooltip("每个UDP分片大小（字节）")]
     public int sendChunkSize = 1024;
 
@@ -27,46 +34,18 @@ public class Main_UDP : MonoBehaviour
     [Tooltip("UI_sampling 引用，用于刷新传输完成文本")]
     public UI_sampling ui;
 
-    // ---------- 内部 ----------
+    // UDP 核心组件
     private UdpClient _udp;
+    private UdpClient _udp_log;
     private Thread _thread;
     private bool _running;
 
     // 回传
     private UdpClient _udpSender;
-    private volatile bool _uploadActive;
-    private volatile bool _transferCompletePending;
-    private volatile string _bleStatusPending;
-    private readonly object _sendLock = new object();
-
-    private void Update()
-    {
-        // 蓝牙状态（后台线程派发到主线程）
-        if (_bleStatusPending != null)
-        {
-            string status = _bleStatusPending;
-            _bleStatusPending = null;
-            switch (status)
-            {
-                case "searching": ui?.BluetoothSearching(); break;
-                case "connected": ui?.BluetoothConnected(); break;
-                case "failed":    ui?.BluetoothFailed();    break;
-            }
-        }
-        if (_transferCompletePending)
-        {
-            _transferCompletePending = false;
-            ui?.TransferringOver();   // UI: 传输完成
-        }
-    }
-
-    // 格式: M=模式 C=当前角度 T=目标角度 A=静息1(float) B=静息2(float)
-    private static readonly Regex _pattern = new Regex(@"^M(\d+)C(\d+)T(\d+)A([-\d.]+)B([-\d.]+)$",
-        RegexOptions.Compiled);
-
-    // ======================================================================
-    // 生命周期
-    // ======================================================================
+    private volatile bool _uploadActive;                //回传启用
+    private volatile bool _transferCompletePending;     //传输完成
+    private volatile string _bleStatusPending;          //BLE状态
+    private readonly object _sendLock = new object();   //读取锁，多线程，防止数据中断
 
     private void OnEnable()
     {
@@ -76,13 +55,23 @@ public class Main_UDP : MonoBehaviour
             return;
         }
 
-        // 启动 UDP 接收
-        _udp = new UdpClient(port);
+        // 启动 UDP 接收数据流
+        _udp = new UdpClient(RECEIVER_PORT);
         _running = true;
-        _thread = new Thread(ReceiveLoop) { IsBackground = true };
+        // 启动 UDP 接收日志流
+        _udp_log = new UdpClient(RECEIVERLOG_PORT);
+
+        // 新建接收线程
+        _thread = new Thread(Loop) { IsBackground = true };  // 直接退出
         _thread.Start();
     }
 
+    // 格式: M=模式 C=当前角度 T=目标角度 A=静息1(float) B=静息2(float)
+    private static readonly Regex _pattern = new Regex(@"^M(\d+)C(\d+)T(\d+)A([-\d.]+)B([-\d.]+)$",
+        RegexOptions.Compiled);
+
+
+    // 启用时
     private void OnDisable()
     {
         _running = false;
@@ -91,36 +80,39 @@ public class Main_UDP : MonoBehaviour
         AbortModelUpload();
     }
 
-    // ======================================================================
-    // UDP 后台线程
-    // ======================================================================
-
-    private void ReceiveLoop()
+    //后台线程方法
+    private void Loop()
     {
-        IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
+        _ = Task.Run(async () =>
+        {
+            await ReceiveLoop();    //接收协程
+        });
+        _ = Task.Run(async () =>
+        {
+            await ReceiveLogLoop(); //接收日志
+        });
+    }
+
+    /// <summary>无限接收循环与解析写入方法</summary>
+    private async Task ReceiveLoop()
+    {
+        IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0); // 发送方IP+端口
 
         while (_running)
         {
             try
             {
-                byte[] bytes = _udp.Receive(ref remoteEP);
+                byte[] bytes = _udp.Receive(ref remoteEP);          // 接收数据并填写发射放地址端口
                 string msg = Encoding.UTF8.GetString(bytes).Trim();
 
-                // 蓝牙状态消息：BLE_STATUS:searching/connected/failed
-                if (msg.StartsWith("BLE_STATUS:"))
-                {
-                    _bleStatusPending = msg.Substring("BLE_STATUS:".Length);
-                    continue;
-                }
-
-                Match m = _pattern.Match(msg);
+                Match m = _pattern.Match(msg);                  // 匹配字段
                 if (!m.Success) continue;
 
-                int mode         = int.Parse(m.Groups[1].Value);
+                int mode = int.Parse(m.Groups[1].Value);
                 int currentAngle = int.Parse(m.Groups[2].Value);
-                int targetAngle  = int.Parse(m.Groups[3].Value);
-                float rest1      = float.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture);
-                float rest2      = float.Parse(m.Groups[5].Value, CultureInfo.InvariantCulture);
+                int targetAngle = int.Parse(m.Groups[3].Value);
+                float rest1 = float.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture);
+                float rest2 = float.Parse(m.Groups[5].Value, CultureInfo.InvariantCulture);
 
                 // 写入 Main_Date
                 dataStore.WriteData(mode, currentAngle, targetAngle, rest1, rest2);
@@ -132,20 +124,34 @@ public class Main_UDP : MonoBehaviour
             catch { break; }
         }
     }
+    /// <summary>无限接收日志循环</summary>
+    private async Task ReceiveLogLoop()
+    {
+        IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0); // 发送方IP+端口
 
-    // ======================================================================
-    // 模型回传 UDP（Unity -> Python -> BLE -> ESP32）
-    // ======================================================================
+        while (_running)
+        {
+            try
+            {
+                byte[] bytes = _udp_log.Receive(ref remoteEP);          // 接收数据并填写发射放地址端口
+                string msg = Encoding.UTF8.GetString(bytes).Trim();
+                // 写入 Main_Date 日志
+                dataStore.WritLog(msg);
+            }
+            catch { break; }
+        }
 
-    /// <summary>启用回传 UDP 发送通道（可被按钮调用）</summary>
-    public void EnableModelUpload()
+    }
+
+    /// <summary>启用回传 UDP sock</summary>
+    public void ReSend_sock_init()
     {
         lock (_sendLock)
         {
             if (_udpSender != null) return;
             _udpSender = new UdpClient();
             _uploadActive = true;
-            Debug.Log($"Main_UDP: 回传已启用 → {sendTargetIP}:{sendPort}");
+            Debug.Log($"Main_UDP: 回传已启用 → {sendTargetIP}:{SENDPORT}");
         }
     }
 
@@ -172,7 +178,7 @@ public class Main_UDP : MonoBehaviour
             UnityEngine.Debug.LogError("Main_UDP: 模型数据为空");
             return;
         }
-        EnableModelUpload();
+        ReSend_sock_init();
         Thread t = new Thread(() => UploadLoop(fileData)) { IsBackground = true };
         t.Start();
     }
@@ -203,7 +209,10 @@ public class Main_UDP : MonoBehaviour
             _uploadActive = false;
         }
     }
-
+    /// <summary>
+    /// UDP 回传方法，
+    /// </summary>
+    /// <param name="data"></param>
     private void SendRaw(byte[] data)
     {
         lock (_sendLock)
@@ -211,7 +220,7 @@ public class Main_UDP : MonoBehaviour
             if (_udpSender == null || !_uploadActive) return;
             try
             {
-                _udpSender.Send(data, data.Length, sendTargetIP, sendPort);
+                _udpSender.Send(data, data.Length, sendTargetIP, SENDPORT);
             }
             catch { /* 发送通道可能已被关闭 */ }
         }

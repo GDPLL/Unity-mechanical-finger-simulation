@@ -16,7 +16,7 @@ def start_UDP_Service():
 
 # BLE接收中转至UDP回调
 def ble_to_udp(message):
-    udp_bridge.UDP_send(message)
+    udp_bridge.UDP_Date_send(message)
 
 # UDP回传BLE回调，启用BLE接收协程
 def udp_to_ble(model_bytes):
@@ -27,7 +27,7 @@ def udp_to_ble(model_bytes):
 
 # 状态变化通知
 def ble_status_to_udp(status):
-    udp_bridge.UDP_send(f"BLE_STATUS:{status}")
+    udp_bridge.UDP_Log_send(f"BLE_STATUS:{status}")
 
 
 def main():
@@ -36,6 +36,7 @@ def main():
     udp_bridge.UDP_register_event(udp_to_ble)                   # UDP -> BLE 回传事件
 
     udp_bridge.UDP_init()                                       # 先建好UDP套接字，避免BLE首包早于UDP就绪被丢弃
+    udp_bridge.UDP_LOG_init()                                   # UDP_log sock
 
     ble_thread = threading.Thread(target=start_BLE_Service, name="ble", daemon=True)    # 启用BLE接收自动中转   
     udp_thread = threading.Thread(target=start_UDP_Service, name="udp", daemon=True)    # 启用UDP回传自动中转

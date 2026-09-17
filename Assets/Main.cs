@@ -3,6 +3,13 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 
+
+/// <summary>
+/// PY进程与功能启动器
+/// <para>负责Py进程数据对外展示</para>
+/// <para>脚本开始时启用Py中转进程</para>
+/// <para>提供对外方法开始训练，启用训练进程，完成后调用UDP回传程序开始回传</para>
+/// </summary>
 public class Main : MonoBehaviour
 {
     [Header("Python中转")]
@@ -27,10 +34,10 @@ public class Main : MonoBehaviour
     [Tooltip("UI_sampling 引用，用于刷新训练/传输状态文本")]
     public UI_sampling ui;
 
-    private Process _pythonProcess;
-    private Process _trainProcess;
-    private volatile bool _trainCompletePending;
-    private volatile bool _transferStartPending;
+    private Process _pythonProcess; //Py中转进程进程
+    private Process _trainProcess;  //Py训练进程
+    private volatile bool _trainCompletePending;    //线程级判断完成
+    private volatile bool _transferStartPending;    //线程级判断传输开始
 
     private void Update()
     {
@@ -45,11 +52,6 @@ public class Main : MonoBehaviour
             ui?.StartTransferring();   // UI: 开始传输
         }
     }
-
-    // ======================================================================
-    // 生命周期
-    // ======================================================================
-
     private void OnEnable()
     {
         LaunchPythonBridge();
@@ -61,10 +63,11 @@ public class Main : MonoBehaviour
         KillTraining();
     }
 
-    // ======================================================================
-    // Python 中转管理
-    // ======================================================================
-
+    /// <summary>
+    /// <para>启动对应路径Py，开启进程</para>
+    /// <para>设置Py输出事件回调，接管输出</para>
+    /// _pythonProcess为目标进程字段
+    /// </summary>
     private void LaunchPythonBridge()
     {
         // 构建脚本完整路径
@@ -92,33 +95,33 @@ public class Main : MonoBehaviour
 
         try
         {
-            ProcessStartInfo psi = new ProcessStartInfo
+            ProcessStartInfo psi = new ProcessStartInfo     //c#启动外部进程配置
             {
-                FileName = pyExe,
-                Arguments = $"\"{scriptPath}\"",
-                UseShellExecute = false,
+                FileName = pyExe,                           //程序名称
+                Arguments = $"\"{scriptPath}\"",            //脚本完整路径
+                UseShellExecute = false,                    //直接启动可执行文件，重定向输出
                 CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
+                RedirectStandardOutput = true,              //父程序接管进程
+                RedirectStandardError = true,               //错误信息接管
+                StandardOutputEncoding = Encoding.UTF8,     //输出程序
                 StandardErrorEncoding = Encoding.UTF8,
             };
             psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
 
-            _pythonProcess = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            _pythonProcess = new Process { StartInfo = psi, EnableRaisingEvents = true };   //创建进程对象
             _pythonProcess.OutputDataReceived += (s, e) =>
             {
                 if (!string.IsNullOrEmpty(e.Data))
-                    UnityEngine.Debug.Log($"[Python] {e.Data}");
+                    UnityEngine.Debug.Log($"[Python] {e.Data}");        //接管正常输出
             };
             _pythonProcess.ErrorDataReceived += (s, e) =>
             {
                 if (!string.IsNullOrEmpty(e.Data))
-                    UnityEngine.Debug.LogError($"[Python] {e.Data}");
+                    UnityEngine.Debug.LogError($"[Python] {e.Data}");   //接管错误输出
             };
 
             _pythonProcess.Start();
-            _pythonProcess.BeginOutputReadLine();
+            _pythonProcess.BeginOutputReadLine();   //.NET内部启动循环
             _pythonProcess.BeginErrorReadLine();
 
             UnityEngine.Debug.Log($"Main: Python bridge started (PID: {_pythonProcess.Id})");
@@ -129,13 +132,16 @@ public class Main : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// <para> 中止py进程并释放资源</para>
+    /// </summary>
     private void KillPythonBridge()
     {
         if (_pythonProcess != null && !_pythonProcess.HasExited)
         {
             try
             {
-                _pythonProcess.Kill();
+                _pythonProcess.Kill();      //中止进程
                 _pythonProcess.WaitForExit(2000);
                 UnityEngine.Debug.Log("Main: Python bridge stopped");
             }
@@ -143,11 +149,15 @@ public class Main : MonoBehaviour
             {
                 UnityEngine.Debug.LogWarning($"Main: Error stopping Python: {ex.Message}");
             }
-            _pythonProcess.Dispose();
+            _pythonProcess.Dispose();       //释放资源
             _pythonProcess = null;
         }
     }
 
+    /// <summary>
+    /// 返回可用py命令名
+    /// </summary>
+    /// <returns></returns>
     private static string FindPython()
     {
         // Windows: py, 再查 python3 / python
@@ -180,51 +190,30 @@ public class Main : MonoBehaviour
         return null;
     }
 
-    // ======================================================================
-    // 手势识别训练
-    // ======================================================================
-
-    private void KillTraining()
-    {
-        if (_trainProcess != null && !_trainProcess.HasExited)
-        {
-            try
-            {
-                _trainProcess.Kill();
-                _trainProcess.WaitForExit(3000);
-                UnityEngine.Debug.Log("Main: Training process stopped");
-            }
-            catch (System.Exception ex)
-            {
-                UnityEngine.Debug.LogWarning($"Main: Error stopping training process: {ex.Message}");
-            }
-            _trainProcess.Dispose();
-            _trainProcess = null;
-        }
-    }
-
-    /// <summary>启动完整训练管线（预处理→训练→导出）。后台运行，不阻塞主线程。可在 Inspector 中通过按钮调用。</summary>
+    /// <summary>
+    /// 启动训练进程，根据目标路径完成模型输出到目标位置
+    /// </summary>
     public void TrainGestureModel()
     {
-        string scriptPath = Path.Combine(Application.dataPath, "..", trainScriptPath);
+        string scriptPath = Path.Combine(Application.dataPath, "..", trainScriptPath);  //程序路径
         scriptPath = Path.GetFullPath(scriptPath);
 
-        
+
         if (!File.Exists(scriptPath))
         {
             UnityEngine.Debug.LogError($"Train: Training script not found: {scriptPath}");
             return;
         }
 
-        string outDir = Path.Combine(Application.dataPath, "..", trainOutputDir);
+        string outDir = Path.Combine(Application.dataPath, "..", trainOutputDir);   //输出路径
         outDir = Path.GetFullPath(outDir);
 
-        string dataDir = Path.Combine(Application.dataPath, "..", trainDataDir);
+        string dataDir = Path.Combine(Application.dataPath, "..", trainDataDir);    //训练数据路径
         dataDir = Path.GetFullPath(dataDir);
 
-        string pyExe = pythonExePath;
+        string pyExe = pythonExePath;                                               //解释器路径
         if (string.IsNullOrEmpty(pyExe))
-            pyExe = FindPython();
+            pyExe = FindPython();                                                   //查找解释器
 
         if (string.IsNullOrEmpty(pyExe))
         {
@@ -240,11 +229,11 @@ public class Main : MonoBehaviour
         try
         {
             UnityEngine.Debug.Log($"Train: Using Python: {pyExe}");
-            ProcessStartInfo psi = new ProcessStartInfo
+            ProcessStartInfo psi = new ProcessStartInfo     //配置进程
             {
                 FileName = pyExe,
                 Arguments = $"\"{scriptPath}\" --data-dir \"{dataDir}\" --output-dir \"{outDir}\"",
-                UseShellExecute = false,
+                UseShellExecute = false,        //重定向
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -280,7 +269,7 @@ public class Main : MonoBehaviour
                 }
             };
 
-            _trainProcess.Start();
+            _trainProcess.Start();                  //开始训练进程
             _trainProcess.BeginOutputReadLine();
             _trainProcess.BeginErrorReadLine();
 
@@ -293,13 +282,12 @@ public class Main : MonoBehaviour
         }
     }
 
-    // ======================================================================
-    // 模型回传（供按钮调用）
-    // ======================================================================
-
-    /// <summary>把训练好的模型文件回传给 ESP32。读取 ModelExport/gesture_model.tflite，交给 Main_UDP 发送。</summary>
+    /// <summary>
+    /// 把训练好的模型文件回传给 ESP32。读取 ModelExport/gesture_model.tflite，交给 Main_UDP 发送。
+    /// </summary>
     public void SendModelToEsp32()
     {
+        //模型路径
         string modelFile = Path.Combine(Application.dataPath, "..", trainOutputDir, "gesture_model.tflite");
         modelFile = Path.GetFullPath(modelFile);
 
@@ -316,8 +304,33 @@ public class Main : MonoBehaviour
         }
 
         byte[] bytes = File.ReadAllBytes(modelFile);
+
+        //由Unity端开始回传
         udpBridge.SendModelToEsp32(bytes);
+
         UnityEngine.Debug.Log($"SendModel: 已把 {bytes.Length} 字节模型交给 Main_UDP 回传");
         _transferStartPending = true;   // UI: 开始传输（主线程派发）
+    }
+
+    /// <summary>
+    /// 中止训练进程,并释放内存
+    /// </summary>
+    private void KillTraining()
+    {
+        if (_trainProcess != null && !_trainProcess.HasExited)
+        {
+            try
+            {
+                _trainProcess.Kill();
+                _trainProcess.WaitForExit(3000);
+                UnityEngine.Debug.Log("Main: Training process stopped");
+            }
+            catch (System.Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"Main: Error stopping training process: {ex.Message}");
+            }
+            _trainProcess.Dispose();
+            _trainProcess = null;
+        }
     }
 }

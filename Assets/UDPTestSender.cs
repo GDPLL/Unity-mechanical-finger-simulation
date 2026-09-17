@@ -19,9 +19,9 @@ public class UDPTestSender : MonoBehaviour
 
     void Start()
     {
-        _udpClient = new UdpClient();
+        //_udpClient = new UdpClient();
         // 开始循环发送协程
-        StartCoroutine(SendLoop());
+        //StartCoroutine(SendLoop());
     }
 
     IEnumerator SendLoop()
