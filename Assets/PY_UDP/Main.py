@@ -5,19 +5,7 @@ import time
 import ble_receiver
 import udp_bridge
 
-# ============================================================
-# Main - 编排层（Composition Root）
-# ------------------------------------------------------------
-# 职责只有三件事：
-#   1) 启动两个互相不认识的服务（各自独立线程）
-#   2) 接线：把 A 的输出注入成 B 的输入，反之亦然
-#   3) 生命周期：启动 / 优雅停止
-# ble_receiver 与 udp_bridge 之间没有任何 import 关系，
-# 单独运行任何一个文件都能正常工作。
-# ============================================================
-
-
-# ===== 1. 两个组件的独立启动函数 =====
+# 启动BLE
 def start_BLE_Service():
     asyncio.run(ble_receiver.BLE_Receiver_Start())    #启动BLE服务
 
@@ -26,34 +14,31 @@ def start_UDP_Service():
     asyncio.run(udp_bridge.UDP_start())          #启动UDP发送（-> Unity）
 
 
-# ===== 2. 中转逻辑：组件之间怎么调度，只写在这里 =====
+# BLE接收中转至UDP回调
 def ble_to_udp(message):
-    """方向 A：ESP32 --BLE--> PC --UDP--> Unity"""
     udp_bridge.UDP_send(message)
 
-
+# UDP回传BLE回调，启用BLE接收协程
 def udp_to_ble(model_bytes):
-    """方向 B：Unity --UDP--> PC --BLE--> ESP32
-       本函数运行在 udp_bridge 的接收线程里，
-       ble_receiver.BLE_Sender_Start 内部用 run_coroutine_threadsafe 投递到 BLE 事件循环"""
     ok = ble_receiver.BLE_Sender_Start(model_bytes)
     if not ok:
         print("main|模型未能回传 ESP32（BLE 未连接）")
 
 
+# 状态变化通知
 def ble_status_to_udp(status):
     udp_bridge.UDP_send(f"BLE_STATUS:{status}")
 
 
 def main():
+    ble_receiver.BLE_register(ble_to_udp)                       # BLE -> UDP 接收转发注册
+    ble_receiver.BLE_register_callback(ble_status_to_udp)       # BLE 状态 -> UDP
+    udp_bridge.UDP_register_event(udp_to_ble)                   # UDP -> BLE 回传事件
 
-    # ---- 接线：双方只认识回调，不认识对方 ----
-    ble_receiver.BLE_register(ble_to_udp)            # BLE -> UDP 接收转发注册
-    ble_receiver.BLE_status_callback(ble_status_to_udp)      # BLE 状态 -> UDP
-    udp_bridge.event(udp_to_ble)                # UDP -> BLE
+    udp_bridge.UDP_init()                                       # 先建好UDP套接字，避免BLE首包早于UDP就绪被丢弃
 
-    ble_thread = threading.Thread(target=start_BLE_Service, name="ble", daemon=True)
-    udp_thread = threading.Thread(target=start_UDP_Service, name="udp", daemon=True)
+    ble_thread = threading.Thread(target=start_BLE_Service, name="ble", daemon=True)    # 启用BLE接收自动中转   
+    udp_thread = threading.Thread(target=start_UDP_Service, name="udp", daemon=True)    # 启用UDP回传自动中转
     ble_thread.start()
     udp_thread.start()
 

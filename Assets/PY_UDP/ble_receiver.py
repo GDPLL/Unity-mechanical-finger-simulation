@@ -15,38 +15,45 @@ BLE_WRITE_DELAY = 0.02                       # 两次 BLE 写入间隔（秒）
 _loop = None        #事件循环
 _client = None      #蓝牙客户端组件
 _stop_event = None  # asyncio.Event，控制会话退出
+_send_lock = None   # asyncio.Lock，单协程运行锁
 
 _ble_status_event = []    # BLE连接变化事件
 _ble_Receive_event = []     #BLE接收事件
 
 
 # BLE接收事件注册
-def BLE_register(func):                                   
+def BLE_register(func):   
+    global _ble_Receive_event                                 
     _ble_Receive_event.append(func)
 
-def BLE_status_callback(cb):
-    """注册状态回调：连接状态变化时调用 cb(status: str)
-       status 取值：searching / connecting / connected / failed / disconnected"""
+# BLE状态变化注册
+def BLE_register_callback(func):
     global _ble_status_event
-    _ble_status_event = cb
+    _ble_status_event.append(func)
 
 # 将ble_receiver -> BLE 启动回传协程
 def BLE_Sender_Start(model_bytes):
-    #可从任意线程调用（如 udp_bridge 的接收线程）。
-    #把模型字节数据经 BLE 回传 ESP32。
     global _loop, _client
     if _loop is None or _client is None or not _client.is_connected:
         print("ble_receiver| BLE 未连接，无法回传模型")
         return False
 
     try:
-        # 关键：BLE 的 client 只属于 _loop 所在线程，必须用这个跨线程投递，
-        # 绝不能直接 await 或在别的线程里操作 client
-        asyncio.run_coroutine_threadsafe(BLE_Sender(model_bytes), _loop)
+        # 采用跨线程启动回传协程
+        future = asyncio.run_coroutine_threadsafe(BLE_Sender(model_bytes), _loop)
     except RuntimeError as e:
         print(f"ble_receiver| 事件循环不可用: {e}")
         return False
+    future.add_done_callback(_BLE_Sender_done)   # 回传结束事件
     return True
+
+
+# 异常和取消时抛出异常并打印
+def _BLE_Sender_done(future):
+    try:
+        future.result()
+    except Exception as e:
+        print(f"ble_receiver| 模型回传失败: {e}")
 
 
 def stop_ble():
@@ -57,22 +64,36 @@ def stop_ble():
 
 # ble_receiver - > BLE  回传协程
 async def BLE_Sender(model_bytes):
-    global _client
+    global _client, _send_lock
+    client = _client                                    # 固定本次回传使用的客户端
+    if client is None or not client.is_connected:
+        print("ble_receiver| BLE 未连接，回传中止")
+        return False
+    if _send_lock is None:                              # 在所属事件循环内创建
+        _send_lock = asyncio.Lock()
+
     total = len(model_bytes)
     print(f"ble_receiver|开始回传模型，共 {total} 字节")
-    for i in range(0, total, BLE_CHUNK_SIZE):
-        chunk = model_bytes[i:i + BLE_CHUNK_SIZE]           #分包
+    async with _send_lock:                              #同一时刻只允许一次回传，避免分片交错
+        for i in range(0, total, BLE_CHUNK_SIZE):
+            chunk = model_bytes[i:i + BLE_CHUNK_SIZE]           #分包
+            try:
+                await client.write_gatt_char(WRITE_CHARACTERISTIC_UUID, chunk, response=True) #传入目标特征，必须确认收到
+            except Exception:
+                try:
+                    await client.write_gatt_char(WRITE_CHARACTERISTIC_UUID, chunk, response=False) #超时切换无收到传输
+                except Exception as e:
+                    print(f"ble_receiver| 分片写入失败（偏移 {i}），回传中止: {e}")
+                    return False
+            await asyncio.sleep(BLE_WRITE_DELAY) # 延时等待对方处理
+        # 发送结束标记
         try:
-            await _client.write_gatt_char(WRITE_CHARACTERISTIC_UUID, chunk, response=True) #传入目标特征，必须确认收到
-        except Exception:
-            await _client.write_gatt_char(WRITE_CHARACTERISTIC_UUID, chunk, response=False) #超时切换无收到传输
-        await asyncio.sleep(BLE_WRITE_DELAY) # 延时等待对方处理
-    # 发送结束标记
-    try:
-        await _client.write_gatt_char(WRITE_CHARACTERISTIC_UUID, b"__MODEL_END__", response=True)
-    except Exception as e:
-        print(f"ble_receiver| 结束标记发送失败: {e}")
+            await client.write_gatt_char(WRITE_CHARACTERISTIC_UUID, b"__MODEL_END__", response=True)
+        except Exception as e:
+            print(f"ble_receiver| 结束标记发送失败: {e}")
+            return False
     print("ble_receiver| 模型回传完成")
+    return True
 
 
 # 启用并配置GATT会话协程
@@ -110,14 +131,16 @@ async def BLE_Receiver_Session(esp32_mac):
     global _client, _stop_event
 
     try:
+        # 自动连接并拿到客户端对象
         async with BleakClient(esp32_mac) as client:
             _client = client
             print("ble_receiver|连接成功！等待数据中... (Ctrl+C 或 stop_ble() 停止)")
             BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|连接成功！等待数据中... ")
 
+            # 等待数据，触发注册事件
             await client.start_notify(CHARACTERISTIC_UUID, BLE_Receiver)
 
-            # 等待停止信号，而不是永久阻塞
+            # 等待停止信号
             await _stop_event.wait()
 
             print("ble_receiver|收到停止信号，正在断开...")
