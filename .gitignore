@@ -59,3 +59,17 @@ Thumbs.db
 *.bak
 .env
 *.local
+
+# ============================================
+# 自定义忽略规则：TextMeshPro 生成的字体资源
+# ============================================
+# 忽略所有生成的 SDF 字体资源，防止大文件进入版本库
+/[Aa]ssets/**/[Ff]onts/ 
+/[Aa]ssets/**/*.[Ss][Dd][Ff].asset
+# 特别忽略已知的超大字体文件
+/[Aa]ssets/MSYHL SDF.asset
+# 忽略所有 .ttc 字体文件
+*.ttc
+/[Aa]ssets/**/*.ttc
+*.ttc.meta
+/[Aa]ssets/MSYHL SDF.asset.meta

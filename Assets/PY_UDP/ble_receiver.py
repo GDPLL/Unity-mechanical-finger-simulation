@@ -103,7 +103,8 @@ async def BLE_Receiver_Start():
     _loop = asyncio.get_running_loop()
     _stop_event = asyncio.Event()
 
-    BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|正在扫描'{ESP32_NAME}' ...")
+    # Unity 侧约定的枚举值：searching / connected / failed / disconnected
+    BLE_Event_Savetrigger(_ble_status_event, "searching")
     print(f"ble_receiver|正在扫描 '{ESP32_NAME}' ...")
     devices = await BleakScanner.discover(timeout=5.0)
 
@@ -114,15 +115,15 @@ async def BLE_Receiver_Start():
         if device.name == ESP32_NAME:
             esp32_mac = device.address
             print(f"ble_receiver|找到设备! MAC: {esp32_mac}")
-            BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|找到设备! MAC: {esp32_mac}")
+            BLE_Event_Savetrigger(_ble_status_event, "searching")   # 已发现但尚未建连，仍属 searching
             break
 
     if not esp32_mac:
         print("ble_receiver|没找到 ESP32，请检查")
-        BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|没找到 ESP32，请检查")
+        BLE_Event_Savetrigger(_ble_status_event, "failed")
         return
 
-    BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|连接成功")
+
     await BLE_Receiver_Session(esp32_mac)
 
 # 接收端会话
@@ -135,7 +136,7 @@ async def BLE_Receiver_Session(esp32_mac):
         async with BleakClient(esp32_mac) as client:
             _client = client
             print("ble_receiver|连接成功！等待数据中... (Ctrl+C 或 stop_ble() 停止)")
-            BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|连接成功！等待数据中... ")
+            BLE_Event_Savetrigger(_ble_status_event, "connected")
 
             # 等待数据，触发注册事件
             await client.start_notify(CHARACTERISTIC_UUID, BLE_Receiver)
@@ -151,11 +152,11 @@ async def BLE_Receiver_Session(esp32_mac):
         raise
     except Exception as e:
         print(f"ble_receiver|连接失败: {e}")
-        BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|连接失败: {e}")
+        BLE_Event_Savetrigger(_ble_status_event, "failed")
         return False
     finally:
         _client = None
-        BLE_Event_Savetrigger(_ble_status_event,f"ble_receiver|连接已关闭")
+        BLE_Event_Savetrigger(_ble_status_event, "disconnected")
         print("ble_receiver|连接已关闭")
     return True
 

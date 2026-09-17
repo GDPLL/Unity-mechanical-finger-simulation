@@ -22,8 +22,9 @@ public class Main_Date : MonoBehaviour
     public float rest2 { get; private set; }   // 通道B基准值（float）
     public bool hasData { get; private set; }
 
-    // Py进程日志存储
-    public Queue<string> Recevie_Log;   
+    // Py进程日志存储（跨线程：UDP日志线程写、主线程读，必须加锁）
+    public Queue<string> Recevie_Log = new Queue<string>();
+    private readonly object _logLock = new object();
     private const int MAX_COUNT = 100;
 
     // 允许同时读，锁定写入独占
@@ -37,11 +38,6 @@ public class Main_Date : MonoBehaviour
 
     [Tooltip("记录完成回调（可在 Inspector 中绑定按钮/事件）")]
     public UnityEvent onRecordingComplete;
-
-    [Header("UI 事件")]
-    [Tooltip("UI_sampling 引用，用于刷新记录状态文本")]
-    public UI_sampling ui;
-
 
     private bool _recording;    // 记录中 状态
     private int _recordCount;
@@ -64,6 +60,9 @@ public class Main_Date : MonoBehaviour
             this.hasData = true;
         }
         finally { rwLock.ExitWriteLock(); }
+
+        // UI 事件：本方法由 UDP 线程调用，AppEvents 内部做主线程安全派发
+        AppEvents.Instance?.PublishTelemetry(mode, currentAngle, targetAngle, rest1, rest2);
     }
 
     /// <summary>
@@ -72,11 +71,17 @@ public class Main_Date : MonoBehaviour
     /// <param name="str">日志</param>
     public void WritLog(string str)
     {
-        if (Recevie_Log.Count >= MAX_COUNT)
+        if (string.IsNullOrEmpty(str)) return;
+
+        lock (_logLock)
         {
-            Recevie_Log.Dequeue();   // 满了，丢掉最旧的一条
+            if (Recevie_Log.Count >= MAX_COUNT)
+            {
+                Recevie_Log.Dequeue();   // 满了，丢掉最旧的一条
+            }
+            Recevie_Log.Enqueue(str);
         }
-        Recevie_Log.Enqueue(str);
+        AppEvents.Instance?.PublishLog(str);
     }
 
     /// <summary>
@@ -85,9 +90,12 @@ public class Main_Date : MonoBehaviour
     /// <returns></returns>
     public string ReadLog()
     {
-        if (Recevie_Log.Count == 0)
-            return null;
-        return Recevie_Log.Dequeue();
+        lock (_logLock)
+        {
+            if (Recevie_Log.Count == 0)
+                return null;
+            return Recevie_Log.Dequeue();
+        }
     }
 
     /// <summary>由主线程调用：读取数据</summary>
@@ -118,7 +126,7 @@ public class Main_Date : MonoBehaviour
         _csvBuf.AppendLine("emg_col0,emg_col1");
         ClearRecordFolder();
         Debug.Log($"Main_Date: 开始记录（目标 {targetRows} 行）...");
-        ui?.TextStart();   // UI: 记录开始
+        AppEvents.Instance?.PublishRecordStatus(RecordStatus.Recording);   // UI 事件（无需再引用 UI 脚本）
     }
 
     /// <summary>中止记录</summary>
@@ -155,7 +163,7 @@ public class Main_Date : MonoBehaviour
             _completionPending = false;
             Debug.Log("Main_Date: 记录完成！");
             onRecordingComplete?.Invoke();
-            ui?.TextOver();   // UI: 记录完成
+            AppEvents.Instance?.PublishRecordStatus(RecordStatus.Completed);   // UI 事件
         }
     }
 

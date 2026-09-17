@@ -30,10 +30,6 @@ public class Main_UDP : MonoBehaviour
     [Tooltip("每个UDP分片大小（字节）")]
     public int sendChunkSize = 1024;
 
-    [Header("UI 事件")]
-    [Tooltip("UI_sampling 引用，用于刷新传输完成文本")]
-    public UI_sampling ui;
-
     // UDP 核心组件
     private UdpClient _udp;
     private UdpClient _udp_log;
@@ -43,8 +39,6 @@ public class Main_UDP : MonoBehaviour
     // 回传
     private UdpClient _udpSender;
     private volatile bool _uploadActive;                //回传启用
-    private volatile bool _transferCompletePending;     //传输完成
-    private volatile string _bleStatusPending;          //BLE状态
     private readonly object _sendLock = new object();   //读取锁，多线程，防止数据中断
 
     private void OnEnable()
@@ -70,12 +64,29 @@ public class Main_UDP : MonoBehaviour
     private static readonly Regex _pattern = new Regex(@"^M(\d+)C(\d+)T(\d+)A([-\d.]+)B([-\d.]+)$",
         RegexOptions.Compiled);
 
+    // 蓝牙状态前缀（Python 侧经日志端口 8889 发来）
+    private const string BLE_STATUS_PREFIX = "BLE_STATUS:";
+
+    /// <summary>解析蓝牙状态载荷，只认约定枚举值</summary>
+    private static bool TryParseBleStatus(string payload, out BleStatus status)
+    {
+        switch (payload.ToLowerInvariant())
+        {
+            case "searching": status = BleStatus.Searching; return true;
+            case "connected": status = BleStatus.Connected; return true;
+            case "failed": status = BleStatus.Failed; return true;
+            case "disconnected": status = BleStatus.Disconnected; return true;
+            default: status = default; return false;
+        }
+    }
+
 
     // 启用时
     private void OnDisable()
     {
         _running = false;
         _udp?.Close();
+        _udp_log?.Close();      
         _thread?.Join(50);
         AbortModelUpload();
     }
@@ -100,11 +111,30 @@ public class Main_UDP : MonoBehaviour
 
         while (_running)
         {
+            string msg;
             try
             {
                 byte[] bytes = _udp.Receive(ref remoteEP);          // 接收数据并填写发射放地址端口
-                string msg = Encoding.UTF8.GetString(bytes).Trim();
+                msg = Encoding.UTF8.GetString(bytes).Trim();
+            }
+            catch (ObjectDisposedException)
+            {
+                break;                                              // OnDisable 关闭套接字，正常收尾
+            }
+            catch (SocketException e) when (!_running)
+            {
+                UnityEngine.Debug.Log($"Main_UDP: 数据接收已停止 ({e.SocketErrorCode})");
+                break;
+            }
+            catch (Exception e)
+            {
+                UnityEngine.Debug.LogException(e);                  // 绝不静默退出
+                break;
+            }
 
+            // 单包解析失败只跳过这一包，不能打断整条接收链
+            try
+            {
                 Match m = _pattern.Match(msg);                  // 匹配字段
                 if (!m.Success) continue;
 
@@ -121,7 +151,10 @@ public class Main_UDP : MonoBehaviour
                 if (dataStore.isRecording)
                     dataStore.RecordSample(rest1, rest2);
             }
-            catch { break; }
+            catch (Exception e)
+            {
+                UnityEngine.Debug.LogError($"Main_UDP: 数据包处理失败，已跳过: {e.Message}");
+            }
         }
     }
     /// <summary>无限接收日志循环</summary>
@@ -131,14 +164,49 @@ public class Main_UDP : MonoBehaviour
 
         while (_running)
         {
+            string msg;
             try
             {
                 byte[] bytes = _udp_log.Receive(ref remoteEP);          // 接收数据并填写发射放地址端口
-                string msg = Encoding.UTF8.GetString(bytes).Trim();
-                // 写入 Main_Date 日志
+                msg = Encoding.UTF8.GetString(bytes).Trim();
+            }
+            catch (ObjectDisposedException)
+            {
+                break;                                                  // OnDisable 关闭套接字，正常收尾
+            }
+            catch (SocketException e) when (!_running)
+            {
+                UnityEngine.Debug.Log($"Main_UDP: 日志接收已停止 ({e.SocketErrorCode})");
+                break;
+            }
+            catch (Exception e)
+            {
+                UnityEngine.Debug.LogException(e);                      // 绝不静默退出
+                break;
+            }
+
+            try
+            {
+                // 蓝牙状态：BLE_STATUS:searching|connected|failed|disconnected -> UI 事件
+                if (msg.StartsWith(BLE_STATUS_PREFIX, StringComparison.Ordinal))
+                {
+                    string payload = msg.Substring(BLE_STATUS_PREFIX.Length).Trim();
+                    if (TryParseBleStatus(payload, out BleStatus bleStatus))
+                    {
+                        AppEvents.Instance?.PublishBleStatus(bleStatus);
+                        continue;
+                    }
+                    // 未识别的载荷不静默丢弃，落成日志便于排查
+                    UnityEngine.Debug.LogWarning($"Main_UDP: 无法识别的蓝牙状态: {payload}");
+                }
+
+                // 写入 Main_Date 日志（内部会转发到 UI 事件）
                 dataStore.WritLog(msg);
             }
-            catch { break; }
+            catch (Exception e)
+            {
+                UnityEngine.Debug.LogError($"Main_UDP: 日志处理失败，已跳过: {e.Message}");
+            }
         }
 
     }
@@ -198,7 +266,8 @@ public class Main_UDP : MonoBehaviour
             }
             SendRaw(Encoding.ASCII.GetBytes("MODEL_END"));
             UnityEngine.Debug.Log($"Main_UDP: 模型已发送 {data.Length} 字节");
-            _transferCompletePending = true;   // UI: 传输完成（主线程派发）
+            // 本方法在后台线程运行，AppEvents 内部会派发到主线程
+            AppEvents.Instance?.PublishTransferStatus(TransferStatus.Completed);
         }
         catch (Exception ex)
         {

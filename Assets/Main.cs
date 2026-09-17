@@ -30,28 +30,9 @@ public class Main : MonoBehaviour
     [Tooltip("Main_UDP 引用，用于回传模型")]
     public Main_UDP udpBridge;
 
-    [Header("UI 事件")]
-    [Tooltip("UI_sampling 引用，用于刷新训练/传输状态文本")]
-    public UI_sampling ui;
-
     private Process _pythonProcess; //Py中转进程进程
     private Process _trainProcess;  //Py训练进程
-    private volatile bool _trainCompletePending;    //线程级判断完成
-    private volatile bool _transferStartPending;    //线程级判断传输开始
 
-    private void Update()
-    {
-        if (_trainCompletePending)
-        {
-            _trainCompletePending = false;
-            ui?.StartOver();   // UI: 训练完成
-        }
-        if (_transferStartPending)
-        {
-            _transferStartPending = false;
-            ui?.StartTransferring();   // UI: 开始传输
-        }
-    }
     private void OnEnable()
     {
         LaunchPythonBridge();
@@ -260,10 +241,14 @@ public class Main : MonoBehaviour
                     if (_trainProcess.ExitCode == 0)
                     {
                         UnityEngine.Debug.Log("Train: Pipeline complete!");
-                        _trainCompletePending = true;   // UI: 训练完成（主线程派发）
+                        // 回调发生在后台线程，AppEvents 内部会派发到主线程
+                        AppEvents.Instance?.PublishTrainingStatus(TrainingStatus.Completed);
                     }
                     else
+                    {
                         UnityEngine.Debug.LogError($"Train: Pipeline failed (exit code {_trainProcess.ExitCode})");
+                        AppEvents.Instance?.PublishTrainingStatus(TrainingStatus.Failed);
+                    }
                     _trainProcess.Dispose();
                     _trainProcess = null;
                 }
@@ -274,7 +259,7 @@ public class Main : MonoBehaviour
             _trainProcess.BeginErrorReadLine();
 
             UnityEngine.Debug.Log($"Train: Pipeline started in background (PID: {_trainProcess.Id})");
-            ui?.StartTraining();   // UI: 训练开始
+            AppEvents.Instance?.PublishTrainingStatus(TrainingStatus.Running);   // UI 事件
         }
         catch (System.Exception ex)
         {
@@ -309,7 +294,7 @@ public class Main : MonoBehaviour
         udpBridge.SendModelToEsp32(bytes);
 
         UnityEngine.Debug.Log($"SendModel: 已把 {bytes.Length} 字节模型交给 Main_UDP 回传");
-        _transferStartPending = true;   // UI: 开始传输（主线程派发）
+        AppEvents.Instance?.PublishTransferStatus(TransferStatus.Running);   // UI 事件
     }
 
     /// <summary>
