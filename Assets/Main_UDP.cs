@@ -58,6 +58,8 @@ public class Main_UDP : MonoBehaviour
         // 新建接收线程
         _thread = new Thread(Loop) { IsBackground = true };  // 直接退出
         _thread.Start();
+
+        ReSend_sock_init();  // 回传通道常开，供指令与模型随时发送
     }
 
     // 格式: M=模式 C=当前角度 T=目标角度 A=静息1(float) B=静息2(float)
@@ -273,11 +275,20 @@ public class Main_UDP : MonoBehaviour
         {
             UnityEngine.Debug.LogError($"Main_UDP: 模型发送失败: {ex.Message}");
         }
-        finally
-        {
-            _uploadActive = false;
-        }
     }
+
+    /// <summary>发送模式切换指令 0比例1阈值2手势</summary>
+    public void SendModeCommand(int mode)
+    {
+        if (mode < 0 || mode > 2)
+        {
+            UnityEngine.Debug.LogError($"Main_UDP|SendModeCommand|模式越界:{mode}");
+            return;
+        }
+        SendRaw(Encoding.ASCII.GetBytes($"CMD:MODE:{mode}"));
+        UnityEngine.Debug.Log($"Main_UDP: 模式切换指令已发送 {mode}");
+    }
+
     /// <summary>
     /// UDP 回传方法，
     /// </summary>

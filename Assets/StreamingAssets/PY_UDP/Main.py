@@ -25,6 +25,13 @@ def udp_to_ble(model_bytes):
         print("main|模型未能回传 ESP32（BLE 未连接）")
 
 
+# UDP指令回传BLE回调，指定通道写入
+def udp_to_ble_cmd(text):
+    ok = ble_receiver.BLE_Cmd_Start(text)
+    if not ok:
+        print("main|指令未能回传 ESP32（BLE 未连接）")
+
+
 # 状态变化通知
 def ble_status_to_udp(status):
     udp_bridge.UDP_Log_send(f"BLE_STATUS:{status}")
@@ -34,6 +41,7 @@ def main():
     ble_receiver.BLE_register(ble_to_udp)                       # BLE -> UDP 接收转发注册
     ble_receiver.BLE_register_callback(ble_status_to_udp)       # BLE 状态 -> UDP
     udp_bridge.UDP_register_event(udp_to_ble)                   # UDP -> BLE 回传事件
+    udp_bridge.UDP_register_cmd_event(udp_to_ble_cmd)           # UDP -> BLE 指令事件
 
     udp_bridge.UDP_init()                                       # 先建好UDP套接字，避免BLE首包早于UDP就绪被丢弃
     udp_bridge.UDP_LOG_init()                                   # UDP_log sock

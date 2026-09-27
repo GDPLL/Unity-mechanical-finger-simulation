@@ -32,7 +32,7 @@ public class Main_Date : MonoBehaviour
 
     [Header("数据记录")]
     [Tooltip("记录目标行数，达到后自动保存并触发完成回调")]
-    public int targetRows = 10000;
+    int targetRows = 1000;
     [Tooltip("CSV 存储目录（相对于项目根目录）")]
     public string recordFolder = "Assets/ninapro_DB2/data";
 

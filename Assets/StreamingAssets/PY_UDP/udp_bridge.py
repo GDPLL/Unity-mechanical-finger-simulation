@@ -13,8 +13,10 @@ LOG_ENABLED = True           # 对应 logEnabled
 
 MODEL_START_TAG = b'MODEL_START:'   # 模型回传起始标记
 MODEL_END_TAG = b'MODEL_END'        # 模型回传结束标记
+CMD_TAG = b'CMD:'                   # 指令回传标记
 
 _UDP_receiver_event = []        # 模型回传回调
+_UDP_cmd_event = []             # 指令回传回调
 
 _no_sock = False             # 套接字就绪标记
 _recv_loop_running = False   # 回传接收循环是否已在运行
@@ -29,6 +31,11 @@ _channels = {
 def UDP_register_event(event):
     global _UDP_receiver_event
     _UDP_receiver_event.append(event)
+
+# 注册指令回传事件
+def UDP_register_cmd_event(event):
+    global _UDP_cmd_event
+    _UDP_cmd_event.append(event)
 
 # UDP 发送到端口回调函数
 def UDP_Date_send(message):
@@ -133,6 +140,13 @@ async def _recv_loop():
             print(f"udp_bridge| 接收循环已退出: {e}")
             break
         
+        if data.startswith(CMD_TAG):
+            cmd = data[len(CMD_TAG):].decode('utf-8', errors='replace').strip()
+            if not cmd:
+                print("udp_bridge|_recv_loop|指令为空")
+                continue
+            UDP_Event_Savetrigger(_UDP_cmd_event, cmd)      # 指令走独立通道，不进模型缓冲
+            continue
         if data.startswith(MODEL_START_TAG):
             model_buf = bytearray(data[len(MODEL_START_TAG):])
             continue

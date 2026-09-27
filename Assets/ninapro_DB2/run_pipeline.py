@@ -81,6 +81,10 @@ def main(data_dir=None, output_dir=None):
     # Step 3: Export weights
     if not run_script('export_weights.py', ['--output-dir', output_dir]):
         return
+
+    # Step 4: Export LDA coefficients for BLE transfer
+    if not run_script('export_lda.py', ['--data-path', data_path, '--output-dir', output_dir]):
+        return
     
     print("""
     ╔══════════════════════════════════════════════════════════╗
@@ -92,8 +96,8 @@ def main(data_dir=None, output_dir=None):
     ║    - gesture_model.tflite     : TensorFlow Lite model    ║
     ║    - model.h                  : C header for ESP32       ║
     ║    - model_weights.h          : Trained weights          ║
-    ║    - normalization_params.h   : Normalization params     ║
-    ║                                                          ║
+    ║    - normalization_params.h   : Normalization params     ║    ║    - lda_model.bin            : LDA blob for BLE transfer ║
+    ║    - lda_model_generated.h    : LDA coefficients header   ║    ║                                                          ║
     ║    Next steps:                                           ║
     ║    1. Copy model.h to your ESP32 project                 ║
     ║    2. Use esp32_gesture_inference.cpp or                 ║

@@ -8,7 +8,8 @@ from bleak import BleakClient, BleakScanner
 # ===== 配置 =====
 ESP32_NAME = "ESP32_Bridge"                  # ESP32 广播的名字（和你 Arduino 代码里一致）
 CHARACTERISTIC_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"   # 数据接收特征值（ESP32 -> PC）
-WRITE_CHARACTERISTIC_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  # 数据写入特征值（PC -> ESP32）
+WRITE_CHARACTERISTIC_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  # 模型通道（PC -> ESP32）
+CMD_CHARACTERISTIC_UUID = "6E400004-B5A3-F393-E0A9-E50E24DCCA9E"    # 指令通道（PC -> ESP32）
 BLE_CHUNK_SIZE = 20                          # BLE 单次写入字节数（默认 MTU 20）
 BLE_WRITE_DELAY = 0.02                       # 两次 BLE 写入间隔（秒）
 
@@ -54,6 +55,53 @@ def _BLE_Sender_done(future):
         future.result()
     except Exception as e:
         print(f"ble_receiver| 模型回传失败: {e}")
+
+
+# 将文本指令写入指令通道协程
+def BLE_Cmd_Start(text):
+    global _loop, _client
+    if not text:
+        print("ble_receiver| BLE_Cmd_Start| 指令为空")
+        return False
+    if _loop is None or _client is None or not _client.is_connected:
+        print("ble_receiver| BLE_Cmd_Start| BLE 未连接")
+        return False
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(BLE_Cmd_Send(text), _loop)
+    except RuntimeError as e:
+        print(f"ble_receiver| BLE_Cmd_Start| 事件循环不可用: {e}")
+        return False
+    future.add_done_callback(_BLE_Cmd_done)
+    return True
+
+
+# 指令回传结果打印
+def _BLE_Cmd_done(future):
+    try:
+        future.result()
+    except Exception as e:
+        print(f"ble_receiver| 指令回传失败: {e}")
+
+
+# 写入指令通道
+async def BLE_Cmd_Send(text):
+    global _client, _send_lock
+    client = _client
+    if client is None or not client.is_connected:
+        print("ble_receiver| BLE_Cmd_Send| BLE 未连接")
+        return False
+    if _send_lock is None:
+        _send_lock = asyncio.Lock()
+
+    async with _send_lock:                              # 与模型回传互斥，避免分片交错
+        try:
+            await client.write_gatt_char(CMD_CHARACTERISTIC_UUID, text.encode('utf-8'), response=True)
+        except Exception as e:
+            print(f"ble_receiver| BLE_Cmd_Send| 写入失败: {e}")
+            return False
+    print(f"ble_receiver| 指令已发送: {text}")
+    return True
 
 
 def stop_ble():

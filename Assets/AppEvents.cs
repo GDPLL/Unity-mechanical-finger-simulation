@@ -29,6 +29,7 @@ public class AppEvents : MonoBehaviour
     public event Action TransferRequested;
     public event Action RecordStartRequested;
     public event Action RecordStopRequested;
+    public event Action<int> ModeRequested;
 
     // ---------------- 状态事件（业务 -> UI，均在主线程触发） ----------------
     public event Action<RecordStatus> RecordStatusChanged;
@@ -43,6 +44,7 @@ public class AppEvents : MonoBehaviour
     public void OnTransferButton() { TransferRequested?.Invoke(); }
     public void OnRecordStartButton() { RecordStartRequested?.Invoke(); }
     public void OnRecordStopButton() { RecordStopRequested?.Invoke(); }
+    public void OnModeButton(int mode) { ModeRequested?.Invoke(mode); }
 
     // ---------------- 状态发布接口（可从任意线程调用） ----------------
     public void PublishRecordStatus(RecordStatus status)

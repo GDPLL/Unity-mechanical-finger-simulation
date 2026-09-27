@@ -32,16 +32,54 @@ public class Main : MonoBehaviour
 
     private Process _pythonProcess; //Py中转进程进程
     private Process _trainProcess;  //Py训练进程
+    private bool _subscribed;       //模式事件订阅状态
 
     private void OnEnable()
     {
         LaunchPythonBridge();
+        TrySubscribe();
+    }
+
+    private void Start()
+    {
+        TrySubscribe();
     }
 
     private void OnDisable()
     {
+        Unsubscribe();
         KillPythonBridge();
         KillTraining();
+    }
+
+    /// <summary>订阅模式切换事件</summary>
+    private void TrySubscribe()
+    {
+        if (_subscribed) return;
+        AppEvents events = AppEvents.Instance;
+        if (events == null) return;
+        events.ModeRequested += OnModeRequested;
+        _subscribed = true;
+    }
+
+    /// <summary>退订模式切换事件</summary>
+    private void Unsubscribe()
+    {
+        if (!_subscribed) return;
+        AppEvents events = AppEvents.Instance;
+        if (events != null) events.ModeRequested -= OnModeRequested;
+        _subscribed = false;
+    }
+
+    /// <summary>把模式切换请求交给回传通道</summary>
+    private void OnModeRequested(int mode)
+    {
+        if (udpBridge == null)
+        {
+            UnityEngine.Debug.LogError("Main|OnModeRequested|udpBridge 未指定");
+            return;
+        }
+        udpBridge.SendModeCommand(mode);
     }
 
     /// <summary>
@@ -52,22 +90,15 @@ public class Main : MonoBehaviour
     private void LaunchPythonBridge()
     {
         // 构建脚本完整路径
-        string scriptPath = Path.Combine(Application.dataPath, "..", pythonScriptPath);
-        scriptPath = Path.GetFullPath(scriptPath);
-
-        if (!File.Exists(scriptPath))
+        string scriptPath = ResolveInputPath(pythonScriptPath);
+        if (scriptPath == null)
         {
-            UnityEngine.Debug.LogWarning($"Main: Python script not found: {scriptPath}");
+            UnityEngine.Debug.LogWarning("Main: Python script not found, bridge will not start");
             return;
         }
 
         // 自动查找 Python 解释器
-        string pyExe = pythonExePath;
-        if (string.IsNullOrEmpty(pyExe))
-        {
-            pyExe = FindPython();
-        }
-
+        string pyExe = ResolvePythonExe();
         if (string.IsNullOrEmpty(pyExe))
         {
             UnityEngine.Debug.LogWarning("Main: Python interpreter not found, specify pythonExePath manually");
@@ -171,31 +202,86 @@ public class Main : MonoBehaviour
         return null;
     }
 
+    /// <summary>查找必须已存在的输入文件/目录，找不到返回 null 并打印所有尝试过的路径</summary>
+    private static string ResolveInputPath(string relativePath)
+    {
+        string[] candidates = BuildPathCandidates(relativePath);
+
+        foreach (string candidate in candidates)
+        {
+            if (File.Exists(candidate) || Directory.Exists(candidate))
+                return candidate;
+        }
+
+        UnityEngine.Debug.LogError(
+            $"[Path] 未找到 {relativePath}，已尝试:\n  " + string.Join("\n  ", candidates));
+        return null;
+    }
+
+    /// <summary>输出目录：与输入查找的第一候选保持一致（项目根 / 构建产物根），不要求已存在</summary>
+    private static string ResolveOutputPath(string relativePath)
+    {
+        return Path.GetFullPath(Path.Combine(Application.dataPath, "..", relativePath));
+    }
+
+    private static string[] BuildPathCandidates(string relativePath)
+    {
+        return new[]
+        {
+            // 项目根 / 构建产物根
+            Path.GetFullPath(Path.Combine(Application.dataPath, "..", relativePath)),
+            // 随包分发：Assets/StreamingAssets/PY_UDP/...
+            Path.GetFullPath(Path.Combine(Application.streamingAssetsPath, TrimAssetsPrefix(relativePath))),
+        };
+    }
+
+    private static string TrimAssetsPrefix(string relativePath)
+    {
+        const string prefix = "Assets";
+        if (relativePath.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase)
+            && relativePath.Length > prefix.Length
+            && (relativePath[prefix.Length] == '/' || relativePath[prefix.Length] == '\\'))
+        {
+            return relativePath.Substring(prefix.Length + 1);
+        }
+        return relativePath;
+    }
+
+    /// <summary>解析可用的 Python 解释器：配置的完整路径失效时回退到 PATH 查找</summary>
+    private string ResolvePythonExe()
+    {
+        string pyExe = pythonExePath;
+
+        bool looksLikePath = !string.IsNullOrEmpty(pyExe)
+                             && (pyExe.IndexOf('/') >= 0 || pyExe.IndexOf('\\') >= 0);
+        if (looksLikePath && !File.Exists(pyExe))
+        {
+            UnityEngine.Debug.LogWarning($"Main: 配置的 Python 不存在，回退到 PATH 查找: {pyExe}");
+            pyExe = null;
+        }
+
+        if (string.IsNullOrEmpty(pyExe))
+            pyExe = FindPython();
+
+        return string.IsNullOrEmpty(pyExe) ? null : pyExe;
+    }
+
     /// <summary>
     /// 启动训练进程，根据目标路径完成模型输出到目标位置
     /// </summary>
     public void TrainGestureModel()
     {
-        string scriptPath = Path.Combine(Application.dataPath, "..", trainScriptPath);  //程序路径
-        scriptPath = Path.GetFullPath(scriptPath);
-
-
-        if (!File.Exists(scriptPath))
+        string scriptPath = ResolveInputPath(trainScriptPath);   //程序路径
+        if (scriptPath == null)
         {
-            UnityEngine.Debug.LogError($"Train: Training script not found: {scriptPath}");
+            UnityEngine.Debug.LogError("Train: Training script not found, pipeline will not start");
             return;
         }
 
-        string outDir = Path.Combine(Application.dataPath, "..", trainOutputDir);   //输出路径
-        outDir = Path.GetFullPath(outDir);
+        string outDir = ResolveOutputPath(trainOutputDir);       //输出路径
+        string dataDir = ResolveOutputPath(trainDataDir);        //训练数据路径
 
-        string dataDir = Path.Combine(Application.dataPath, "..", trainDataDir);    //训练数据路径
-        dataDir = Path.GetFullPath(dataDir);
-
-        string pyExe = pythonExePath;                                               //解释器路径
-        if (string.IsNullOrEmpty(pyExe))
-            pyExe = FindPython();                                                   //查找解释器
-
+        string pyExe = ResolvePythonExe();                       //解释器路径
         if (string.IsNullOrEmpty(pyExe))
         {
             UnityEngine.Debug.LogError("Train: Python interpreter not found");
@@ -268,17 +354,16 @@ public class Main : MonoBehaviour
     }
 
     /// <summary>
-    /// 把训练好的模型文件回传给 ESP32。读取 ModelExport/gesture_model.tflite，交给 Main_UDP 发送。
+    /// 把训练好的模型文件回传给 ESP32。读取 ModelExport/lda_model.bin，交给 Main_UDP 发送。
     /// </summary>
     public void SendModelToEsp32()
     {
         //模型路径
-        string modelFile = Path.Combine(Application.dataPath, "..", trainOutputDir, "gesture_model.tflite");
-        modelFile = Path.GetFullPath(modelFile);
+        string modelFile = ResolveInputPath(Path.Combine(trainOutputDir, "lda_model.bin"));
 
-        if (!File.Exists(modelFile))
+        if (modelFile == null)
         {
-            UnityEngine.Debug.LogError($"SendModel: 模型文件未找到: {modelFile}");
+            UnityEngine.Debug.LogError("SendModel: 模型文件未找到，请先完成训练");
             return;
         }
 
